@@ -81,7 +81,7 @@ def get_equity_returns(
     tickers: list[str] | None = None,
     start: str = EQUITY_START,
     end: str = EQUITY_END,
-    save_path: str | None = "./data/equity_returns.csv"
+    save_path: str | None = "./data/raw/equity_returns.csv"
     ) -> pd.DataFrame:
     """
     Fetch, clean, and compute log returns for equities.
@@ -249,7 +249,7 @@ def get_crypto_returns(
     start: str = "2024-01-01",
     end: str = "2026-01-01",
     top_n: int = 100,
-    save_path: str | None = "./data/crypto_returns.csv",
+    save_path: str | None = "./data/raw/crypto_returns.csv",
     ) -> pd.DataFrame:
     """
     Fetch, clean, and compute log returns for crypto.
