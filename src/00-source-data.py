@@ -10,15 +10,27 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 import ccxt
-import urllib.request
+import requests
 import os
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
-EQUITY_START = "2016-01-01"
-EQUITY_END = "2026-01-01"
+EQUITY_TRAIN_START = "2016-01-01"
+EQUITY_TRAIN_END = "2024-01-01"
+EQUITY_VAL_START = "2024-01-02"
+EQUITY_VAL_END = "2025-01-01"
+EQUITY_TEST_START = "2025-01-02"
+EQUITY_TEST_END = "2026-01-01"
+
+CRYPTO_TRAIN_START = "2024-01-01"
+CRYPTO_TRAIN_END = "2025-01-01"
+CRYPTO_VAL_START = "2025-01-02"
+CRYPTO_VAL_END = "2025-06-30"
+CRYPTO_TEST_START = "2025-07-01"
+CRYPTO_TEST_END = "2026-01-01"
+
 MISSING_THRESH = 0.95   # drop tickers missing more than 5% of trading days
 CRYPTO_LIMIT = 1000   # candles per ccxt request
 CCXT_SLEEP = 0.5    # seconds between requests to avoid rate limiting
@@ -28,20 +40,22 @@ CCXT_SLEEP = 0.5    # seconds between requests to avoid rate limiting
 # ---------------------------------------------------------------------------
 
 def get_sp500_tickers() -> list[str]:
-    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    req = urllib.request.Request(url, headers={
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
-    })
-    with urllib.request.urlopen(req) as response:
-        html = response.read()
-    table = pd.read_html(html)[0]
-    tickers = table["Symbol"].str.replace(".", "-", regex=False).tolist()
+    """
+    Return list of current S&P 500 tickers.
+    Use csv downloaded from https://github.com/datasets/s-and-p-500-companies/blob/main/data/constituents.csv
+    
+    Returns:
+        List of ticker strings, e.g. ['AAPL', 'MSFT', 'GOOGL', ...].
+    """
+        
+    constituents = pd.read_csv("./data/raw/sp500_constituents.csv")
+    tickers = constituents["Symbol"].tolist()
     return tickers
 
 def fetch_equity_prices(
     tickers: list[str],
-    start: str = EQUITY_START,
-    end: str = EQUITY_END,
+    start: str = EQUITY_TRAIN_START,
+    end: str = EQUITY_TEST_END,
     ) -> pd.DataFrame:
     """
     Download adjusted closing prices for a list of tickers via yfinance.
@@ -77,36 +91,40 @@ def clean_prices(prices: pd.DataFrame, thresh: float = MISSING_THRESH) -> pd.Dat
     return prices
 
 
-def get_equity_returns(
+def get_equity_returns_train_val_test(
     tickers: list[str] | None = None,
-    start: str = EQUITY_START,
-    end: str = EQUITY_END,
-    save_path: str | None = "./data/raw/equity_returns.csv"
-    ) -> pd.DataFrame:
+    save_dir: str | None = "./data/raw/"
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Fetch, clean, and compute log returns for equities.
 
     Args:
         tickers: List of ticker strings. Defaults to current S&P 500.
-        start:   Start date string (YYYY-MM-DD).
-        end:     End date string (YYYY-MM-DD).
+        save_dir: Directory to save the cleaned returns CSVs.
 
     Returns:
-        log_returns: DataFrame of shape (days, tickers).
+        log_returns_train/val/test: DataFrames of shape (days, tickers) for each split.
     """
     if tickers is None:
         tickers = get_sp500_tickers()
 
-    prices      = fetch_equity_prices(tickers, start, end)
+    prices      = fetch_equity_prices(tickers)
     prices      = clean_prices(prices)
     log_returns = np.log(prices / prices.shift(1)).dropna()
 
-    if save_path:
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        log_returns.to_csv(save_path)
-        print(f"[equities] saved to {save_path}")
+    # split into train/val/test by date
+    log_returns_train = log_returns.loc[EQUITY_TRAIN_START:EQUITY_TRAIN_END]
+    log_returns_val   = log_returns.loc[EQUITY_VAL_START:EQUITY_VAL_END]
+    log_returns_test  = log_returns.loc[EQUITY_TEST_START:EQUITY_TEST_END]
+
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+        log_returns_train.to_csv(os.path.join(save_dir, "equity_returns_train.csv"))
+        log_returns_val.to_csv(os.path.join(save_dir, "equity_returns_val.csv"))
+        log_returns_test.to_csv(os.path.join(save_dir, "equity_returns_test.csv"))
+        print(f"[equities] saved to {save_dir}")
     
-    return log_returns
+    return log_returns_train, log_returns_val, log_returns_test
 
 
 # ---------------------------------------------------------------------------
@@ -206,8 +224,8 @@ def fetch_crypto_prices(
     symbols: list[str],
     exchange: ccxt.Exchange,
     timeframe: str = "1d",
-    start: str = "2024-01-01",
-    end: str = "2026-01-01",
+    start: str = CRYPTO_TRAIN_START,
+    end: str = CRYPTO_TEST_END,
     ) -> pd.DataFrame:
     """
     Fetch closing prices for a list of crypto symbols, with basic rate-limit handling.
@@ -220,7 +238,7 @@ def fetch_crypto_prices(
         end:       End date string (YYYY-MM-DD).
 
     Returns:
-        DataFrame of close prices, shape (days, symbols).
+        Dataframes of shape (days, symbols), containing closing prices.
     """
     since_ms  = exchange.parse8601(f"{start}T00:00:00Z")
     end_dt    = pd.Timestamp(end, tz="UTC")
@@ -242,15 +260,13 @@ def fetch_crypto_prices(
     return prices
 
 
-def get_crypto_returns(
+def get_crypto_returns_train_val_test(
     symbols: list[str] | None = None,
     exchange_id: str = "kraken",
     timeframe: str = "1d",
-    start: str = "2024-01-01",
-    end: str = "2026-01-01",
     top_n: int = 100,
-    save_path: str | None = "./data/raw/crypto_returns.csv",
-    ) -> pd.DataFrame:
+    save_dir: str | None = "./data/raw",
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Fetch, clean, and compute log returns for crypto.
 
@@ -258,12 +274,10 @@ def get_crypto_returns(
         symbols:     Explicit list of ccxt symbols. If None, fetches top N by volume.
         exchange_id: ccxt exchange identifier.
         timeframe:   Candle interval.
-        start:       Start date string (YYYY-MM-DD).
-        end:         End date string (YYYY-MM-DD).
         top_n:       Number of top-volume symbols to use if symbols is None.
-
+        save_dir:    Directory to save the cleaned returns CSVs.
     Returns:
-        log_returns: DataFrame of shape (days, symbols).
+        log_returns_train/val/test: DataFrames of shape (days, symbols) for each split.
     """
     exchange = get_exchange(exchange_id)
 
@@ -275,24 +289,34 @@ def get_crypto_returns(
         "ALGO/USD", "ATOM/USD", "XLM/USD", "TRX/USD", "COMP/USD",
         "NEAR/USD", "UNI/USD", "XMR/USD", "ZEC/USD", "DASH/USD"]
 
-    prices      = fetch_crypto_prices(symbols, exchange, timeframe, start, end)
+    prices      = fetch_crypto_prices(symbols, exchange, timeframe)
     prices      = clean_prices(prices)
     log_returns = np.log(prices / prices.shift(1)).dropna()
 
-    if save_path:
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        log_returns.to_csv(save_path)
-        print(f"[crypto] saved to {save_path}")
+    log_returns_train = log_returns.loc[CRYPTO_TRAIN_START:CRYPTO_TRAIN_END]
+    log_returns_val   = log_returns.loc[CRYPTO_VAL_START:CRYPTO_VAL_END]
+    log_returns_test  = log_returns.loc[CRYPTO_TEST_START:CRYPTO_TEST_END]
 
-    return log_returns
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+        log_returns_train.to_csv(os.path.join(save_dir, "crypto_returns_train.csv"))
+        log_returns_val.to_csv(os.path.join(save_dir, "crypto_returns_val.csv"))
+        log_returns_test.to_csv(os.path.join(save_dir, "crypto_returns_test.csv"))
+        print(f"[crypto] saved to {save_dir}")
+
+    return log_returns_train, log_returns_val, log_returns_test
 
 
 
 if __name__ == "__main__":
     print("=== Equity returns ===")
-    eq_returns = get_equity_returns()
-    print(eq_returns.head())
+    eq_returns = get_equity_returns_train_val_test()
+    print(eq_returns[0].head())  # Print the training set
+    print(eq_returns[1].head())  # Print the validation set
+    print(eq_returns[2].head())  # Print the test set
 
     print("\n=== Crypto returns ===")
-    cr_returns = get_crypto_returns(top_n=50)
-    print(cr_returns.head())
+    cr_returns = get_crypto_returns_train_val_test(top_n=50)
+    print(cr_returns[0].head())  # Print the training set
+    print(cr_returns[1].head())  # Print the validation set
+    print(cr_returns[2].head())  # Print the test set
